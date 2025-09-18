@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>CSV Consolidator → Excel (Advertiser totals)</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <style>
+    body { background:#f7f9fb }
+    .card { border-radius:12px;box-shadow:0 6px 18px rgba(12,20,40,0.06);}
+    pre { white-space:pre-wrap }
+  </style>
+</head>
+<body>
+  <div class="container py-4">
+    <div class="card p-4">
+      <h3 class="mb-2">CSV Consolidator → Excel (Advertiser totals)</h3>
+      <p class="text-muted">Upload multiple CSV files. <b>"Campaign Report"</b> → campaign metrics. <b>"Brand Halo"</b> → brand halo metrics. The Excel has two sheets: <b>All Data</b> (raw merged rows) and <b>Totals</b> (Advertiser-level sums).</p>
+
+      <div class="mb-3">
+        <input id="fileInput" type="file" accept=".csv,text/csv" multiple class="form-control" />
+      </div>
+
+      <div class="mb-3">
+        <button id="processBtn" class="btn btn-primary">Process & Download Excel</button>
+        <span id="status" class="ms-3 text-muted">No files loaded.</span>
+      </div>
+    </div>
+  </div>
+
+<script>
+const fileInput = document.getElementById('fileInput');
+const processBtn = document.getElementById('processBtn');
+const status = document.getElementById('status');
+
+function findKeyCaseInsensitive(row, candidates) {
+  const keys = Object.keys(row || {});
+  const lcKeys = keys.map(k => k && k.trim().toLowerCase());
+  for (const cand of candidates) {
+    const target = cand.trim().toLowerCase();
+    const idx = lcKeys.indexOf(target);
+    if (idx !== -1) return keys[idx];
+  }
+  return null;
+}
+
+function parseNumberFlexible(v) {
+  if (v === null || v === undefined) return 0;
+  let s = String(v).trim();
+  if (s === '') return 0;
+  s = s.replace(/\(([^)]+)\)/g, '-$1'); // (123) -> -123
+  s = s.replace(/[^0-9\.\-,%]/g, '');
+  s = s.replace(/,/g, '');
+  if (s === '' || s === '-') return 0;
+  return parseFloat(s.replace('%','')) || 0;
+}
+
+processBtn.addEventListener('click', async () => {
+  const files = fileInput.files;
+  if (!files || files.length === 0) { status.textContent = 'Please select at least one CSV file.'; return; }
+
+  status.textContent = 'Parsing files...';
+  const allData = [];
+  const totalsMap = new Map();
+  let seenCampaign = false, seenHalo = false;
+
+  function ensureEntry(advertiser) {
+    if (!totalsMap.has(advertiser)) {
+      totalsMap.set(advertiser, {
+        Advertiser: advertiser,
+        Campaign_TotalCost: 0,
+        Campaign_Impressions: 0,
+        Campaign_Clicks: 0,
+        Campaign_CTR: 0,
+        Campaign_ROAS: 0,
+        Halo_Purchases: 0,
+        Halo_Purchases_BH: 0,
+        Halo_TotalPurchases: 0,
+        Halo_SalesUSD: 0,
+        Halo_SalesUSD_BH: 0,
+        Halo_TotalSalesUSD: 0
+      });
+    }
+    return totalsMap.get(advertiser);
+  }
+
+  for (const f of files) {
+    const fname = f.name || '';
+    const lower = fname.toLowerCase();
+    const fileType = lower.includes('campaign report') ? 'Campaign' : (lower.includes('brand halo') ? 'Halo' : 'Other');
+
+    if (fileType === 'Campaign') seenCampaign = true;
+    if (fileType === 'Halo') seenHalo = true;
+
+    await new Promise(resolve => {
+      Papa.parse(f, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (results) => {
+          const rows = results.data || [];
+          for (const row of rows) {
+            row.SourceFile = fname;
+            row.ReportType = fileType;
+            allData.push(row);
+
+            const advKey = findKeyCaseInsensitive(row, ['Advertiser']);
+            const advertiser = advKey ? String(row[advKey]).trim() || 'Unknown' : 'Unknown';
+            const entry = ensureEntry(advertiser);
+
+            if (fileType === 'Campaign') {
+              const cost = parseNumberFlexible(row[findKeyCaseInsensitive(row, ['Total cost','Cost'])]);
+              const imps = parseNumberFlexible(row[findKeyCaseInsensitive(row, ['Impressions'])]);
+              const clicks = parseNumberFlexible(row[findKeyCaseInsensitive(row, ['Click-throughs','Clicks'])]);
+              const ctr = parseNumberFlexible(row[findKeyCaseInsensitive(row, ['CTR'])]);
+              const roas = parseNumberFlexible(row[findKeyCaseInsensitive(row, ['Total ROAS','ROAS'])]);
+
+              entry.Campaign_TotalCost += cost;
+              entry.Campaign_Impressions += imps;
+              entry.Campaign_Clicks += clicks;
+              entry.Campaign_CTR += ctr;
+              entry.Campaign_ROAS += roas;
+            }
+
+            if (fileType === 'Halo') {
+              entry.Halo_Purchases += parseNumberFlexible(row[findKeyCaseInsensitive(row, ['Purchases'])]);
+              entry.Halo_Purchases_BH += parseNumberFlexible(row[findKeyCaseInsensitive(row, ['Purchases BH','Purchases_BH'])]);
+              entry.Halo_TotalPurchases += parseNumberFlexible(row[findKeyCaseInsensitive(row, ['Total purchases'])]);
+              entry.Halo_SalesUSD += parseNumberFlexible(row[findKeyCaseInsensitive(row, ['Sales USD','Sales_USD'])]);
+              entry.Halo_SalesUSD_BH += parseNumberFlexible(row[findKeyCaseInsensitive(row, ['Sales USD BH','Sales_USD_BH'])]);
+              entry.Halo_TotalSalesUSD += parseNumberFlexible(row[findKeyCaseInsensitive(row, ['Total sales USD','Total_sales_USD'])]);
+            }
+          }
+          resolve();
+        },
+        error: () => resolve()
+      });
+    });
+  }
+
+  const totalsArray = [];
+  for (const entry of totalsMap.values()) {
+    const row = { Advertiser: entry.Advertiser };
+    if (seenCampaign && !seenHalo) {
+      row['Total cost'] = entry.Campaign_TotalCost;
+      row['Impressions'] = entry.Campaign_Impressions;
+      row['Click-throughs'] = entry.Campaign_Clicks;
+      row['CTR (%)'] = entry.Campaign_CTR;
+      row['Total ROAS'] = entry.Campaign_ROAS;
+    }
+    if (seenHalo && !seenCampaign) {
+      row['Purchases'] = entry.Halo_Purchases;
+      row['Purchases BH'] = entry.Halo_Purchases_BH;
+      row['Total purchases'] = entry.Halo_TotalPurchases;
+      row['Sales USD'] = entry.Halo_SalesUSD;
+      row['Sales USD BH'] = entry.Halo_SalesUSD_BH;
+      row['Total sales USD'] = entry.Halo_TotalSalesUSD;
+    }
+    if (seenCampaign && seenHalo) {
+      row['Total cost'] = entry.Campaign_TotalCost;
+      row['Impressions'] = entry.Campaign_Impressions;
+      row['Click-throughs'] = entry.Campaign_Clicks;
+      row['CTR (%)'] = entry.Campaign_CTR;
+      row['Total ROAS'] = entry.Campaign_ROAS;
+      row['Purchases'] = entry.Halo_Purchases;
+      row['Purchases BH'] = entry.Halo_Purchases_BH;
+      row['Total purchases'] = entry.Halo_TotalPurchases;
+      row['Sales USD'] = entry.Halo_SalesUSD;
+      row['Sales USD BH'] = entry.Halo_SalesUSD_BH;
+      row['Total sales USD'] = entry.Halo_TotalSalesUSD;
+    }
+    totalsArray.push(row);
+  }
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(allData), 'All Data');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(totalsArray), 'Totals');
+
+  const fnameOut = 'Consolidated_File.xlsx';
+  XLSX.writeFile(wb, fnameOut);
+  status.textContent = `Done — downloaded ${fnameOut} (${totalsArray.length} advertisers).`;
+});
+</script>
+</body>
+</html>
